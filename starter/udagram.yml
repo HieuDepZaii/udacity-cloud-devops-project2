@@ -1,0 +1,179 @@
+Description: hieuvn3-project2-VPC - Udagram
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Environment name
+  VolumeSize:
+    Type: String
+    Description: EC2 volume size
+    Default: "10"  # Default volume size is 10GB
+  KeyPairName:
+    Type: String
+    Description: EC2 Key Pair Name for SSH access
+  ImageId:
+    Type: String
+    Description: Image ID for the EC2 instances
+
+Resources:
+  WebAppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+      - !Ref WebAppInstanceRole  # References the role for EC2 instances
+
+  WebAppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64: |  # Encodes the user data script in base64
+            #!/bin/bash
+            apt-get update -y  
+            apt-get install apache2 -y  # Installs Apache2
+            systemctl start apache2.service  # Starts Apache2 service
+            sudo apt-get install nginx -y  # Installs Nginx
+            service nginx start  # Starts Nginx service
+            WEB_DIR="/var/www/html"
+            # Create a index.html 
+            cat <<EOF > index.html
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Udacity</title>
+            </head>
+            <body>
+                <h1>it works! Udagram, Udacity</h1>
+            </body>
+            </html>
+            EOF
+            sudo rm -r $WEB_DIR/index.*  # Removes default Apache index files
+            sudo cp index.html $WEB_DIR  # Copies the new index.html to the web directory
+            service nginx restart  # Restarts Nginx to apply changes
+        ImageId: !Ref ImageId  # References the AMI ID parameter
+        KeyName: !Ref KeyPairName  # References the Key Pair parameter
+        SecurityGroupIds:
+        - !Ref WebServerSecGroup  # Applies the WebServer security group
+        InstanceType: t2.micro  # Defines instance type (t2.micro)
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"  # Specifies the device name for the volume
+          Ebs:
+            VolumeSize: !Ref VolumeSize  # Sets the volume size from the parameter
+        IamInstanceProfile:
+          Name: !Ref WebAppInstanceProfile  # Assigns the IAM instance profile
+
+  LBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access via load balancer
+      VpcId:
+        Fn::ImportValue: !Sub "${ProjectName}-vpc-id"  # Imports VPC ID from the existing VPC stack
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80  # Allows HTTP access on port 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0  # Accessible from anywhere
+
+  WebServerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access via load balancer
+      VpcId:
+        Fn::ImportValue: !Sub "${ProjectName}-vpc-id"  # Imports VPC ID from the existing VPC stack
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80  # Allows HTTP access on port 80
+        ToPort: 80
+        SourceSecurityGroupId: !Ref LBSecGroup  # Only allows traffic from the load balancer security group
+
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535  # Allows all outbound traffic
+        CidrIp: 0.0.0.0/0  # Accessible to anywhere
+
+  WebAppInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-web-servers"  # Creates a role for EC2 instances
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: 'Allow'
+          Principal:
+            Service:
+            - 'ec2.amazonaws.com'  # Allows EC2 to assume this role
+          Action:
+          - 'sts:AssumeRole'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Allows EC2 instances to communicate with AWS SSM
+      
+  WebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue: !Sub "${ProjectName}-private-subnets"  # Uses private subnets for instances
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebAppLaunchTemplate  # References the launch template for EC2 instances
+        Version: !GetAtt WebAppLaunchTemplate.LatestVersionNumber  # Uses the latest version of the launch template
+      MinSize: '1'  # Ensures at least 1 instance is always running
+      DesiredCapacity: '1'  # Sets the desired instance count to 1
+      MaxSize: '3'  # Limits the maximum instance count to 3
+      TargetGroupARNs:
+      - Ref: WebAppTargetGroup  # Associates the Auto Scaling group with the target group
+
+  WebAppLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+      - Fn::ImportValue: !Sub "${ProjectName}-public-subnet-1"  # Uses public subnet 1 for the load balancer
+      - Fn::ImportValue: !Sub "${ProjectName}-public-subnet-2"  # Uses public subnet 2 for the load balancer
+      SecurityGroups:
+      - Ref: LBSecGroup  # Attaches the load balancer security group
+
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10  # Health checks every 10 seconds
+      HealthCheckPath: /  # Health check path is the root
+      HealthCheckProtocol: HTTP  # Health checks use HTTP
+      HealthCheckTimeoutSeconds: 8  # Timeout for health check responses
+      HealthyThresholdCount: 2  # Two successful checks to mark instance as healthy
+      Port: 80  # Target group listens on port 80
+      Protocol: HTTP  # Target group uses HTTP
+      UnhealthyThresholdCount: 5  # Five failures mark instance as unhealthy
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${ProjectName}-vpc-id"  # Uses the imported VPC ID
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: WebAppTargetGroup  # Forwards traffic to the target group
+      LoadBalancerArn:
+        Ref: WebAppLB  # Associates the listener with the load balancer
+      Port: '80'  # Listens on HTTP port 80
+      Protocol: HTTP
+
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'WebAppTargetGroup'  # Forwards traffic to the target group
+      Conditions:
+      - Field: path-pattern
+        Values: [/]  # Routes traffic based on the root path
+      ListenerArn: !Ref 'Listener'  # Uses the created listener
+      Priority: 1  # Sets the rule priority to 1 (highest)
+
+Outputs:
+  LoadBalancerURL:
+    Description: "Public Web App URL"
+    Value: !Sub "http://${WebAppLB.DNSName}"  # Outputs the DNS name of the load balancer
+    Export:
+      Name: !Sub "${ProjectName}-LoadBalancerURL"  # Exports the LoadBalancer URL for use in other stacks

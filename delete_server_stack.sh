@@ -1,0 +1,1 @@
+aws cloudformation delete-stack --stack-name hieuvn3-project2-vpc-server --region us-east-1
